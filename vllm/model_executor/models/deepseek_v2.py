@@ -541,7 +541,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-        self.routed_scaling_factor = config.routed_scaling_factor
+        self.fp16_residual_rescaled = layer_idx > config.first_k_dense_replace
+        self.deepseek_v2 = config.architectures[0] == "DeepseekV2ForCausalLM"
 
     def forward(
         self,
@@ -566,18 +567,21 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         # Fully Connected
-        if isinstance(self.mlp, DeepseekV2MoE) and \
-            hidden_states.dtype == torch.float16:
+        if self.deepseek_v2 and \
+            isinstance(self.mlp, DeepseekV2MoE) and \
+            hidden_states.dtype == torch.float16 and \
+            self.fp16_residual_rescaled:
             # This is a special case to avoid FP16 overflow
-            hidden_states *= 1. / self.routed_scaling_factor
+            hidden_states *= 1. / self.mlp.routed_scaling_factor                
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        if isinstance(self.mlp, DeepseekV2MLP) and \
-            hidden_states.dtype == torch.float16:
+        if self.deepseek_v2 and \
+            isinstance(self.mlp, DeepseekV2MoE) and \
+            hidden_states.dtype == torch.float16 and \
+            (not self.fp16_residual_rescaled):
             # This is a special case to avoid FP16 overflow
-            hidden_states *= 1. / self.routed_scaling_factor
-            residual *= 1. / self.routed_scaling_factor
+            residual *= 1. / self.mlp.routed_scaling_factor
         return hidden_states, residual
 
 
